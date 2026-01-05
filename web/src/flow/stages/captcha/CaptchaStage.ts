@@ -15,7 +15,7 @@ import { CaptchaChallenge, CaptchaChallengeResponseRequest } from "@goauthentik/
 
 import { match } from "ts-pattern";
 
-import { msg } from "@lit/localize";
+import { LOCALE_STATUS_EVENT, LocaleStatusEventDetail, msg } from "@lit/localize";
 import { css, CSSResult, html, nothing, PropertyValues } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { ifDefined } from "lit/directives/if-defined.js";
@@ -245,7 +245,19 @@ export class CaptchaStage extends BaseStage<CaptchaChallenge, CaptchaChallengeRe
 
     //#region Turnstile
 
+    /**
+     * Renders the Turnstile captcha frame.
+     *
+     * @remarks
+     *
+     * Turnstile will log a warning if the `data-language` attribute
+     * is not in lower-case format.
+     *
+     * @see {@link https://developers.cloudflare.com/turnstile/reference/supported-languages/ Turnstile Supported Languages}
+     */
     protected renderTurnstileFrame = () => {
+        const languageTag = this.activeLanguageTag.toLowerCase();
+
         return html`<div
             id="ak-container"
             class="cf-turnstile"
@@ -253,7 +265,7 @@ export class CaptchaStage extends BaseStage<CaptchaChallenge, CaptchaChallengeRe
             data-theme="${this.activeTheme}"
             data-callback="callback"
             data-size="flexible"
-            data-language=${ifPresent(this.activeLanguageTag)}
+            data-language=${ifPresent(languageTag)}
         ></div>`;
     };
 
@@ -415,8 +427,12 @@ export class CaptchaStage extends BaseStage<CaptchaChallenge, CaptchaChallengeRe
     }
 
     #refreshVendor() {
+        // First, remove any existing script & listeners...
+        window.removeEventListener(LOCALE_STATUS_EVENT, this.#localeStatusListener);
+
         this.#scriptElement?.remove();
 
+        // Then, load the new script...
         const scriptElement = document.createElement("script");
 
         scriptElement.src = this.challenge.jsUrl;
@@ -432,6 +448,26 @@ export class CaptchaStage extends BaseStage<CaptchaChallenge, CaptchaChallengeRe
             document.body.appendChild(this.captchaDocumentContainer);
         }
     }
+
+    #localeStatusListener = (event: CustomEvent<LocaleStatusEventDetail>) => {
+        if (!this.activeHandler) {
+            return;
+        }
+
+        if (event.detail.status === "error") {
+            console.debug("Error loading locale:", event.detail);
+            return;
+        }
+
+        if (event.detail.status === "loading") {
+            return;
+        }
+
+        const { readyLocale } = event.detail;
+        console.debug(`Locale changed to \`${readyLocale}\``);
+
+        this.#run(this.activeHandler);
+    };
 
     //#endregion
 
@@ -539,14 +575,20 @@ export class CaptchaStage extends BaseStage<CaptchaChallenge, CaptchaChallengeRe
                 console.debug(`authentik/stages/captcha[${name}]: handler succeeded`);
 
                 this.activeHandler = name;
-
-                return;
             } catch (error) {
                 console.debug(`authentik/stages/captcha[${name}]: handler failed`);
                 console.debug(error);
 
                 this.error = pluckErrorDetail(error, "Unspecified error");
             }
+
+            // We begin listening for locale changes once a handler has been successfully run
+            // to avoid interrupting the initial load.
+            window.addEventListener(LOCALE_STATUS_EVENT, this.#localeStatusListener, {
+                signal: this.#listenController.signal,
+            });
+
+            return;
         }
     };
 
